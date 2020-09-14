@@ -79,7 +79,7 @@ def model_train_mode(args, feeder, hparams, global_step):
 	with tf.variable_scope('Duration_model', reuse=tf.AUTO_REUSE) as scope:
 		model_name = 'Duration'
 		model = create_model(model_name or args.model, hparams)
-		model.initialize(feeder.inputs, feeder.input_lengths, feeder.mel_targets, feeder.token_targets, linear_targets=feeder.linear_targets,
+		model.initialize(feeder.inputs_phoneme, feeder.inputs_type, feeder.inputs_time, feeder.input_lengths, feeder.mel_targets, feeder.token_targets, linear_targets=feeder.linear_targets,
 			targets_lengths=feeder.targets_lengths, global_step=global_step,
 			is_training=True, split_infos=feeder.split_infos)
 		model.add_loss()

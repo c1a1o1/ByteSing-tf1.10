@@ -81,10 +81,17 @@ class Duration():
 		for i in range(hp.tacotron_num_gpus):
 			with tf.device(tf.train.replica_device_setter(ps_tasks=1,ps_device="/cpu:0",worker_device=gpus[i])):
 				with tf.variable_scope('inference') as scope:
+					# Embeddings ==> [batch_size, sequence_length, embedding_dim]
+					self.embedding_table = tf.get_variable(
+						'inputs_embedding', [len(symbols), hp.embedding_dim], dtype=tf.float32)
+					embedded_inputs = tf.nn.embedding_lookup(self.embedding_table, tower_inputs[i])
+
 					# MultiBiLSTM Cells
 					multi_bi_lstm = MultiBiLSTMLayer(is_training, size=hp.multi_bi_lstm_units,
 					 zoneout=hp.duration_zoneout_rate, LSTM_layers=hp.duration_layers, scope='duration_MBiLSTM')
 					dur_outputs = multi_bi_lstm(tower_inputs[i], tower_input_lengths[i])
+
+					# 加一个dense或2个dense，将维度降为2维，注意最后一层不能加激活函数。
 
 					self.tower_dur_outputs.append(dur_outputs)
 
@@ -126,6 +133,7 @@ class Duration():
 		total_before_loss = 0
 		total_after_loss= 0
 		total_stop_token_loss = 0
+		# L2范数不要改
 		total_regularization_loss = 0
 		total_loss = 0
 
