@@ -1,5 +1,5 @@
 import tensorflow as tf 
-from tacotron.utils.symbols import symbols
+from tacotron.utils.symbols import duration_symbols
 from infolog import log
 from tacotron.models.helpers import TacoTrainingHelper, TacoTestHelper
 from tacotron.models.modules import *
@@ -25,7 +25,7 @@ class Duration():
 	def __init__(self, hparams):
 		self._hparams = hparams
 
-	def initialize(self, inputs, input_lengths, dur_targets=None, stop_token_targets=None, targets_lengths=None,
+	def initialize(self, inputs_phoneme, inputs_type, inputs_time, input_lengths, dur_targets=None, targets_lengths=None,
 			global_step=None, is_training=False, is_evaluating=False, split_infos=None):
 		"""
 		Initializes the model for inference
@@ -39,10 +39,8 @@ class Duration():
 			of steps in the output time series, M is num_mels, and values are entries in the mel
 			spectrogram. Only needed for training.
 		"""
-		if dur_targets is None and stop_token_targets is not None:
+		if dur_targets is None:
 			raise ValueError('no multi targets were provided but token_targets were given')
-		if dur_targets is not None and stop_token_targets is None:
-			raise ValueError('Dur targets are provided without corresponding token_targets')
 		if is_training and self._hparams.mask_decoder and targets_lengths is None:
 			raise RuntimeError('Model set to mask paddings but no targets lengths provided for the mask!')
 		if is_training and is_evaluating:
@@ -57,24 +55,27 @@ class Duration():
 			tower_input_lengths = tf.split(input_lengths, num_or_size_splits=hp.tacotron_num_gpus, axis=0)
 			tower_targets_lengths = tf.split(targets_lengths, num_or_size_splits=hp.tacotron_num_gpus, axis=0) if targets_lengths is not None else targets_lengths
 
-			p_inputs = tf.py_func(split_func, [inputs, split_infos[:, 0]], lout_float)
-			p_dur_targets = tf.py_func(split_func, [dur_targets, split_infos[:,1]], lout_float) if dur_targets is not None else dur_targets
-			p_stop_token_targets = tf.py_func(split_func, [stop_token_targets, split_infos[:,2]], lout_float) if stop_token_targets is not None else stop_token_targets
+			p_inputs_phoneme = tf.py_func(split_func, [inputs_phoneme, split_infos[:, 0]], lout_float)
+			p_inputs_type = tf.py_func(split_func, [inputs_type, split_infos[:, 1]], lout_float)
+			p_inputs_time = tf.py_func(split_func, [inputs_time, split_infos[:, 2]], lout_float)
+			p_dur_targets = tf.py_func(split_func, [dur_targets, split_infos[:, 3]], lout_float) if dur_targets is not None else dur_targets
 
-			tower_inputs = []
+			tower_inputs_phoneme = []
+			tower_inputs_type = []
+			tower_inputs_time = []
 			tower_dur_targets = []
-			tower_stop_token_targets = []
 
-			batch_size = tf.shape(inputs)[0]
+			batch_size = tf.shape(tower_inputs_phoneme)[0]
 			for i in range (hp.tacotron_num_gpus):
-				tower_inputs.append(tf.reshape(p_inputs[i], [batch_size, -1]))
+				tower_inputs_phoneme.append(tf.reshape(p_inputs_phoneme[i], [batch_size, -1]))
+				tower_inputs_type.append(tf.reshape(p_inputs_type[i], [batch_size, -1]))
+				tower_inputs_time.append(tf.reshape(p_inputs_time[i], [batch_size, -1]))
 				if p_dur_targets is not None:
 					tower_dur_targets.append(tf.reshape(p_dur_targets[i], [batch_size, -1]))
-				if p_stop_token_targets is not None:
-					tower_stop_token_targets.append(tf.reshape(p_stop_token_targets[i], [batch_size, -1]))
 
-		self.tower_stop_token_prediction = []
+
 		self.tower_dur_outputs = []
+		tower_embedded_inputs = []
 		
 		# 1. Declare GPU Devices
 		gpus = ["/gpu:{}".format(i) for i in range(hp.tacotron_gpu_start_idx, hp.tacotron_gpu_start_idx+hp.tacotron_num_gpus)]
@@ -82,28 +83,35 @@ class Duration():
 			with tf.device(tf.train.replica_device_setter(ps_tasks=1,ps_device="/cpu:0",worker_device=gpus[i])):
 				with tf.variable_scope('inference') as scope:
 					# Embeddings ==> [batch_size, sequence_length, embedding_dim]
-					self.embedding_table = tf.get_variable(
-						'inputs_embedding', [len(symbols), hp.embedding_dim], dtype=tf.float32)
-					embedded_inputs = tf.nn.embedding_lookup(self.embedding_table, tower_inputs[i])
+					self.phoneme_embedding_table = tf.get_variable(
+						'inputs_phoneme_embedding', [len(duration_symbols[0]), hp.duration_phoneme_embedding_dim], dtype=tf.float32)					
+					self.type_embedding_table = tf.get_variable(
+						'inputs_type_embedding', [len(duration_symbols[2]), hp.duration_type_embedding_dim], dtype=tf.float32)
+					embedded_inputs_phoneme = tf.nn.embedding_lookup(self.phoneme_embedding_table, tower_inputs_phoneme[i])
+					embedded_inputs_type = tf.nn.embedding_lookup(self.type_embedding_table, tower_inputs_type[i])
+					
+					tower_embedded_inputs = tf.concat([embedded_inputs_phoneme, embedded_inputs_type], axis = -1)
+					tower_embedded_inputs = tf.concat([tower_embedded_inputs, tower_inputs_time], axis = -1)
 
 					# MultiBiLSTM Cells
 					multi_bi_lstm = MultiBiLSTMLayer(is_training, size=hp.multi_bi_lstm_units,
 					 zoneout=hp.duration_zoneout_rate, LSTM_layers=hp.duration_layers, scope='duration_MBiLSTM')
-					dur_outputs = multi_bi_lstm(tower_inputs[i], tower_input_lengths[i])
+					mb_lstm_outputs = multi_bi_lstm(tower_embedded_inputs, tower_input_lengths[i])
 
 					# 加一个dense或2个dense，将维度降为2维，注意最后一层不能加激活函数。
-
-					self.tower_dur_outputs.append(dur_outputs)
+					dense1 = tf.layers.dense(inputs=mb_lstm_outputs, units = 3, activation = None)
+					self.tower_dur_outputs.append(dense1)
 
 			log('initialisation done {}'.format(gpus[i]))
 
 
 
-		self.tower_inputs = tower_inputs
+		self.tower_inputs_phoneme = tower_inputs_phoneme
+		self.tower_inputs_type = tower_inputs_type
+		self.tower_inputs_time = tower_inputs_time
 		self.tower_input_lengths = tower_input_lengths
 		self.tower_dur_targets = tower_dur_targets
 		self.tower_targets_lengths = tower_targets_lengths
-		self.tower_stop_token_targets = tower_stop_token_targets
 
 		self.all_vars = tf.trainable_variables()
 
@@ -111,7 +119,7 @@ class Duration():
 		log('  Train mode:               {}'.format(is_training))
 		log('  Eval mode:                {}'.format(is_evaluating))
 		log('  Synthesis mode:           {}'.format(not (is_training or is_evaluating)))
-		log('  Input:                    {}'.format(inputs.shape))
+		log('  Input:                    {}'.format(inputs_phoneme.shape))
 		for i in range(hp.tacotron_num_gpus+hp.tacotron_gpu_start_idx):
 			log('  device:                   {}'.format(i))
 			log('  MultiBiLSTM out:          {}'.format(self.tower_dur_outputs[i].shape))
@@ -125,15 +133,11 @@ class Duration():
 		hp = self._hparams
 
 		self.tower_before_loss = []
-		self.tower_after_loss= []
-		self.tower_stop_token_loss = []
-		self.tower_regularization_loss = []
 		self.tower_loss = []
+		self.tower_regularization_loss = []
 
-		total_before_loss = 0
-		total_after_loss= 0
-		total_stop_token_loss = 0
 		# L2范数不要改
+		total_before_loss = 0
 		total_regularization_loss = 0
 		total_loss = 0
 
@@ -146,28 +150,9 @@ class Duration():
 						# Compute loss of predictions
 						before = MaskedMSE(self.tower_dur_targets[i], self.tower_dur_outputs[i], self.tower_targets_lengths[i],
 							hparams=self._hparams)
-						#Compute <stop_token> loss (for learning dynamic generation stop)
-						stop_token_loss = MaskedSigmoidCrossEntropy(self.tower_stop_token_targets[i],
-							self.tower_stop_token_prediction[i], self.tower_targets_lengths[i], hparams=self._hparams)
 					else:
 						# Compute loss of predictions before postnet
-						before = tf.losses.mean_squared_error(self.tower_mel_targets[i], self.tower_decoder_output[i])
-						# Compute loss after postnet
-						after = tf.losses.mean_squared_error(self.tower_mel_targets[i], self.tower_mel_outputs[i])
-						#Compute <stop_token> loss (for learning dynamic generation stop)
-						stop_token_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(
-							labels=self.tower_stop_token_targets[i],
-							logits=self.tower_stop_token_prediction[i]))
-
-						if hp.predict_linear:
-							#Compute linear loss
-							#From https://github.com/keithito/tacotron/blob/tacotron2-work-in-progress/models/tacotron.py
-							#Prioritize loss for frequencies under 2000 Hz.
-							l1 = tf.abs(self.tower_linear_targets[i] - self.tower_linear_outputs[i])
-							n_priority_freq = int(2000 / (hp.sample_rate * 0.5) * hp.num_freq)
-							linear_loss = 0.5 * tf.reduce_mean(l1) + 0.5 * tf.reduce_mean(l1[:,:,0:n_priority_freq])
-						else:
-							linear_loss = 0.
+						before = tf.losses.mean_squared_error(self.tower_dur_targets[i], self.tower_dur_outputs[i])
 
 					# Compute the regularization weight
 					if hp.tacotron_scale_regularization:
@@ -179,33 +164,22 @@ class Duration():
 					# Regularize variables
 					# Exclude all types of bias, RNN (Bengio et al. On the difficulty of training recurrent neural networks), embeddings and prediction projection layers.
 					# Note that we consider attention mechanism v_a weights as a prediction projection layer and we don't regularize it. (This gave better stability)
-					regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars
-						if not('bias' in v.name or 'Bias' in v.name or '_projection' in v.name or 'inputs_embedding' in v.name
-							or 'RNN' in v.name or 'LSTM' in v.name)]) * reg_weight
+					regularization = tf.add_n([tf.nn.l2_loss(v) for v in self.all_vars]) * reg_weight
 
 					# Compute final loss term
 					self.tower_before_loss.append(before)
-					self.tower_after_loss.append(after)
-					self.tower_stop_token_loss.append(stop_token_loss)
 					self.tower_regularization_loss.append(regularization)
-					self.tower_linear_loss.append(linear_loss)
 
-					loss = before + after + stop_token_loss + regularization + linear_loss
+					loss = before + regularization
 					self.tower_loss.append(loss)
 
 		for i in range(hp.tacotron_num_gpus):
 			total_before_loss += self.tower_before_loss[i] 
-			total_after_loss += self.tower_after_loss[i]
-			total_stop_token_loss += self.tower_stop_token_loss[i]
 			total_regularization_loss += self.tower_regularization_loss[i]
-			total_linear_loss += self.tower_linear_loss[i]
 			total_loss += self.tower_loss[i]
 
 		self.before_loss = total_before_loss / hp.tacotron_num_gpus
-		self.after_loss = total_after_loss / hp.tacotron_num_gpus
-		self.stop_token_loss = total_stop_token_loss / hp.tacotron_num_gpus
 		self.regularization_loss = total_regularization_loss / hp.tacotron_num_gpus
-		self.linear_loss = total_linear_loss / hp.tacotron_num_gpus
 		self.loss = total_loss / hp.tacotron_num_gpus
 
 	def add_optimizer(self, global_step):

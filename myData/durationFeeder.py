@@ -7,8 +7,8 @@ import numpy as np
 import tensorflow as tf
 from infolog import log
 from sklearn.model_selection import train_test_split
-from tacotron.utils.text import text_to_sequence
-import pinyin as py
+import tacotron.utils.pinyin as py
+from tacotron.utils.symbols import duration_symbols
 
 _batches_per_group = 64
 
@@ -24,27 +24,6 @@ class Feeder:
 		self._cleaner_names = [x.strip() for x in hparams.cleaners.split(',')]
 		self._train_offset = 0
 		self._test_offset = 0
-		self._all_phonems = ['b', 'p', 'f', 'm', \
-			'd', 't', 'n', 'l', \
-            'g', 'k', 'h', \
-            'j', 'q', 'x', \
-            'zh', 'ch', 'sh', 'r', \
-            'z', 'c', 's',\
-            'a',  'ai', 'ao',  'an',  'ang', \
-            'o',  'ou', 'ong', \
-            'e',  'ei', 'en',  'eng', 'er', 'ev', \
-            'i',  'ix', 'iii', \
-            'ia', 'iao','ian', 'iang','ie', \
-            'in', 'ing','io',  'iou', 'iong', \
-            'u',  'ua', 'uo',  'uai', 'uei', \
-            'uan','uen','uang','ueng', \
-            'v',  've', 'van', 'vn', \
-            'ng', 'mm', 'nn',\
-            'rr', 'sp']
-		self._all_pitch = ['0','50','51','52','53','54','55','56','57','58','59',\
-			'60','61','62','63','64','65','66','67','68','69',\
-			'70','71','72','73','74','75','76','77','78','79','80']
-		self._phoneme_type = ['0', '1', '2', '3']
 
 		# Load metadata
         self._dur_dir = os.path.join(os.path.dirname(metadata_filename), 'duration')
@@ -98,43 +77,38 @@ class Feeder:
 			tf.placeholder(tf.int32, shape=(None, None), name='inputs_type'),
 			tf.placeholder(tf.float32, shape=(None, None), name='inputs_time'),
 			tf.placeholder(tf.int32, shape=(None, ), name='input_lengths'),
-			tf.placeholder(tf.float32, shape=(None, None), name='token_targets'),
             # output: [phonemeID, startTime, endTime]
-			tf.placeholder(tf.float32, shape=(None, None, None), name='duration_targets'),
+			tf.placeholder(tf.float32, shape=(None, None, 3), name='duration_targets'),
 			tf.placeholder(tf.int32, shape=(None, ), name='targets_lengths'),
 			tf.placeholder(tf.int32, shape=(hparams.tacotron_num_gpus, None), name='split_infos'),
 			]
 
 			# Create queue for buffering data
-			queue = tf.FIFOQueue(7, [tf.float32, tf.int32, tf.float32, tf.float32, tf.int32, tf.int32], name='input_queue')
+			queue = tf.FIFOQueue(8, [tf.int32, tf.int32, tf.float32, tf.int32, tf.float32, tf.int32, tf.int32], name='input_queue')
 			self._enqueue_op = queue.enqueue(self._placeholders)
-			self.inputs, self.input_lengths, self.token_targets, self.duration_targets, self.targets_lengths, self.split_infos = queue.dequeue()
+			self.inputs_phoneme, self.inputs_type, self.inputs_time, self.input_lengths, self.duration_targets, self.targets_lengths, self.split_infos = queue.dequeue()
 
-			self.inputs.set_shape(self._placeholders[0].shape)
-			self.input_lengths.set_shape(self._placeholders[1].shape)
-			self.token_targets.set_shape(self._placeholders[2].shape)			
-			self.duration_targets.set_shape(self._placeholders[3].shape)
-			self.targets_lengths.set_shape(self._placeholders[4].shape)
-			self.split_infos.set_shape(self._placeholders[5].shape)
+			self.inputs_phoneme.set_shape(self._placeholders[0].shape)
+			self.inputs_type.set_shape(self._placeholders[1].shape)
+			self.inputs_time.set_shape(self._placeholders[2].shape)
+			self.input_lengths.set_shape(self._placeholders[3].shape)			
+			self.duration_targets.set_shape(self._placeholders[4].shape)
+			self.targets_lengths.set_shape(self._placeholders[5].shape)
+			self.split_infos.set_shape(self._placeholders[6].shape)
 
 			# Create eval queue for buffering eval data
-			eval_queue = tf.FIFOQueue(1, [tf.float32, tf.int32, tf.float32, tf.float32, tf.int32, tf.int32], name='eval_queue')
+			eval_queue = tf.FIFOQueue(1, [tf.int32, tf.int32, tf.float32, tf.int32, tf.float32, tf.int32, tf.int32], name='eval_queue')
 			self._eval_enqueue_op = eval_queue.enqueue(self._placeholders)
-			self.eval_inputs, self.eval_input_lengths, self.eval_token_targets, \
+			self.eval_inputs_phoneme, self.eval_inputs_type, self.eval_inputs_time, self.eval_input_lengths, \
 				self.eval_duration_targets, self.eval_targets_lengths, self.eval_split_infos = eval_queue.dequeue()
 
-			self.eval_inputs.set_shape(self._placeholders[0].shape)
-			self.eval_input_lengths.set_shape(self._placeholders[1].shape)
-			self.eval_token_targets.set_shape(self._placeholders[2].shape)
-			self.eval_duration_targets.set_shape(self._placeholders[3].shape)
-			self.eval_targets_lengths.set_shape(self._placeholders[4].shape)
-			self.eval_split_infos.set_shape(self._placeholders[5].shape)
-
-	# one-hot 编码
-	def onehotEncoding(instance, class1):
-		temp = [0] * len(class1)
-		temp[class1.index(instance)] = 1
-		return temp
+			self.eval_inputs_phoneme.set_shape(self._placeholders[0].shape)
+			self.eval_inputs_type.set_shape(self._placeholders[1].shape)
+			self.eval_inputs_time.set_shape(self._placeholders[2].shape)
+			self.eval_input_lengths.set_shape(self._placeholders[3].shape)
+			self.eval_duration_targets.set_shape(self._placeholders[4].shape)
+			self.eval_targets_lengths.set_shape(self._placeholders[5].shape)
+			self.eval_split_infos.set_shape(self._placeholders[6].shape)
 
 	def start_threads(self, session):
 		self._session = session
@@ -149,17 +123,21 @@ class Feeder:
 	def _get_test_groups(self):
 		meta = self._test_meta[self._test_offset]
 		self._test_offset += 1
-
-		# score.npy中的存储格式为：['音素所属音符理论时长'，'音符midi', '音素类型', '音素']
+		
 		score_data = np.load(os.path.join(self._score_dir, meta[4]))
-		input_data = [self._score_to_input(item) for item in score_data]			
+		# score.npy中的存储格式为：['音素所属音符理论时长'，'音符midi', '音素类型', '音素']
+		inputs_phoneme = []
+		inputs_type = []
+		inputs_time = []
+		for item in score_data:
+			inputs_phoneme.append(self._onehot_encoding(item[3], duration_symbols[0]))
+			inputs_type.append(self._onehot_encoding(item[2], duration_symbols[2]))
+			inputs_time.append(float(item[0]))
 		
 		# duration.npy中的存储格式为：['开始时间', '结束时间', '音素']
 		dur_data = np.load(os.path.join(self._dur_dir, meta[3]))
 		dur_target = [self._dur_to_target(item) for item in dur_data]
-		#Create parallel sequences containing zeros to represent a non finished sequence
-		token_target = np.asarray([0.] * (len(dur_target) - 1))
-		return (input_data, dur_target, token_target, len(dur_target))
+		return (inputs_phoneme, inputs_type, inputs_time, dur_target, len(dur_target))
 
 	def make_test_batches(self):
 		start = time.time()
@@ -216,23 +194,29 @@ class Feeder:
 		meta = self._train_meta[self._train_offset]
 		self._train_offset += 1
 
-		# score.npy中的存储格式为：['音素所属音符理论时长'，'音符midi', '音素类型', '音素']
 		score_data = np.load(os.path.join(self._score_dir, meta[4]))
-		input_data = [self._score_to_input(item) for item in score_data]			
+		# score.npy中的存储格式为：['音素所属音符理论时长'，'音符midi', '音素类型', '音素']
+		inputs_phoneme = []
+		inputs_type = []
+		inputs_time = []
+		for item in score_data:
+			inputs_phoneme.append(self._onehot_encoding(item[3], duration_symbols[0]))
+			inputs_type.append(self._onehot_encoding(item[2], duration_symbols[2]))
+			inputs_time.append(float(item[0]))			
 		
 		# duration.npy中的存储格式为：['开始时间', '结束时间', '音素']
 		dur_data = np.load(os.path.join(self._dur_dir, meta[3]))
 		dur_target = [self._dur_to_target(item) for item in dur_data]
-		#Create parallel sequences containing zeros to represent a non finished sequence
-		token_target = np.asarray([0.] * (len(dur_target) - 1))
-		return (input_data, dur_target, token_target, len(dur_target))
+		return (inputs_phoneme, inputs_type, inputs_time, dur_target, len(dur_target))
 
 	def _prepare_batch(self, batches, outputs_per_step):
 		assert 0 == len(batches) % self._hparams.tacotron_num_gpus
 		size_per_device = int(len(batches) / self._hparams.tacotron_num_gpus)
 		np.random.shuffle(batches)
 
-		inputs = None
+		inputs_phoneme = None
+		inputs_time = None
+		inputs_type = None
 		dur_targets = None
 		token_targets = None
 		targets_lengths = None
@@ -243,23 +227,26 @@ class Feeder:
 
 		for i in range(self._hparams.tacotron_num_gpus):
 			batch = batches[size_per_device*i:size_per_device*(i+1)]
-			input_cur_device, input_max_len = self._prepare_inputs([x[0] for x in batch])
-			inputs = np.concatenate((inputs, input_cur_device), axis=1) if inputs is not None else input_cur_device
-			dur_target_cur_device, dur_target_max_len = self._prepare_targets([x[1] for x in batch], outputs_per_step)
+			input_cur_device_phoneme, input_phoneme_max_len = self._prepare_inputs([x[0] for x in batch])
+			input_cur_device_type, input_type_max_len = self._prepare_inputs([x[1] for x in batch])
+			input_cur_device_time, input_time_max_len = self._prepare_inputs([x[2] for x in batch])
+			inputs_phoneme = np.concatenate((inputs_phoneme, input_cur_device_phoneme), axis=1) if inputs_phoneme is not None else input_cur_device_phoneme
+			inputs_type = np.concatenate((inputs_phoneme, input_cur_device_type), axis=1) if inputs_type is not None else input_cur_device_type
+			inputs_time = np.concatenate((inputs_time, input_cur_device_time), axis=1) if inputs_time is not None else input_cur_device_time
+			dur_target_cur_device, dur_target_max_len = self._prepare_targets([x[3] for x in batch], outputs_per_step)
 			dur_targets = np.concatenate(( dur_targets, dur_target_cur_device), axis=1) if dur_targets is not None else dur_target_cur_device
 
-			#Pad sequences with 1 to infer that the sequence is done
-			token_target_cur_device, token_target_max_len = self._prepare_token_targets([x[2] for x in batch], outputs_per_step)
-			token_targets = np.concatenate((token_targets, token_target_cur_device),axis=1) if token_targets is not None else token_target_cur_device
-			split_infos.append([input_max_len, dur_target_max_len, token_target_max_len])
+			split_infos.append([input_phoneme_max_len, input_type_max_len, input_time_max_len, dur_target_max_len])
 
 		split_infos = np.asarray(split_infos, dtype=np.int32)
-		return (inputs, input_lengths, dur_targets, token_targets, targets_lengths, split_infos)
+		return (inputs_phoneme, inputs_type, inputs_time, input_lengths, dur_targets, targets_lengths, split_infos)
 
-	def _score_to_input(self, score_data):
-		return [onehotEncoding(score_data[3], self._all_phonems), \
-			onehotEncoding(score_data[2], self._all_pitch), float(score_data[0])]
-			
+	# one-hot 编码
+	def _onehot_encoding(self, instance, class1):
+		temp = [0] * len(class1)
+		temp[class1.index(instance)] = 1
+		return temp
+
 	def _dur_to_target(self, dur_data):
 		return [dur_data[2], float(dur_data[0]), float(dur_data[1])]
 

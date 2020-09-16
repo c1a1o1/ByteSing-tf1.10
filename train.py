@@ -8,6 +8,7 @@ from hparams import hparams
 from infolog import log
 from tacotron.synthesize import tacotron_synthesize
 from tacotron.train import tacotron_train
+from trainDuration import duration_train
 
 log = infolog.log
 
@@ -46,6 +47,7 @@ def main():
 		help='Hyperparameter overrides as a comma-separated list of name=value pairs')
 	parser.add_argument('--tacotron_input', default='training_data/train.txt')
 	parser.add_argument('--wavenet_input', default='tacotron_output/gta/map.txt')
+	parser.add_argument('--duration_input', default='training_data/train.txt')
 	parser.add_argument('--name', help='Name of logging directory.')
 	parser.add_argument('--model', default='Tacotron')
 	parser.add_argument('--input_dir', default='training_data', help='folder to contain inputs sentences/targets')
@@ -67,7 +69,7 @@ def main():
 	parser.add_argument('--slack_url', default=None, help='slack webhook notification destination link')
 	args = parser.parse_args()
 
-	accepted_models = ['Tacotron']
+	accepted_models = ['Tacotron', 'Duration']
 
 	if args.model not in accepted_models:
 		raise ValueError('please enter a valid model to train: {}'.format(accepted_models))
@@ -76,6 +78,8 @@ def main():
 
 	if args.model == 'Tacotron':
 		tacotron_train(args, log_dir, hparams)
+	elif args.model == 'Duration':
+		duration_train(args, log_dir, hparams)
 	else:
 		raise ValueError('Model provided {} unknown! {}'.format(args.model, accepted_models))
 

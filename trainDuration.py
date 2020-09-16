@@ -13,7 +13,6 @@ from hparams import hparams_debug_string
 from myData.durationFeeder import Feeder
 from tacotron.models import create_model
 from tacotron.utils import ValueWindow, plot
-from tacotron.utils.text import sequence_to_text
 from tacotron.utils.symbols import symbols
 from tqdm import tqdm
 
@@ -38,37 +37,22 @@ def add_embedding_stats(summary_writer, embedding_names, paths_to_meta, checkpoi
 def add_train_stats(model, hparams):
 	with tf.variable_scope('stats') as scope:
 		for i in range(hparams.tacotron_num_gpus):
-			tf.summary.histogram('mel_outputs %d' % i, model.tower_mel_outputs[i])
-			tf.summary.histogram('mel_targets %d' % i, model.tower_mel_targets[i])
+			tf.summary.histogram('dur_outputs %d' % i, model.tower_dur_outputs[i])
 		tf.summary.scalar('before_loss', model.before_loss)
-		tf.summary.scalar('after_loss', model.after_loss)
-
-		if hparams.predict_linear:
-			tf.summary.scalar('linear_loss', model.linear_loss)
-			for i in range(hparams.tacotron_num_gpus):
-				tf.summary.histogram('mel_outputs %d' % i, model.tower_linear_outputs[i])
-				tf.summary.histogram('mel_targets %d' % i, model.tower_linear_targets[i])
 		
 		tf.summary.scalar('regularization_loss', model.regularization_loss)
-		tf.summary.scalar('stop_token_loss', model.stop_token_loss)
 		tf.summary.scalar('loss', model.loss)
 		tf.summary.scalar('learning_rate', model.learning_rate) #Control learning rate decay speed
-		if hparams.tacotron_teacher_forcing_mode == 'scheduled':
-			tf.summary.scalar('teacher_forcing_ratio', model.ratio) #Control teacher forcing ratio decay when mode = 'scheduled'
 		gradient_norms = [tf.norm(grad) for grad in model.gradients]
 		tf.summary.histogram('gradient_norm', gradient_norms)
 		tf.summary.scalar('max_gradient_norm', tf.reduce_max(gradient_norms)) #visualize gradients (in case of explosion)
 		return tf.summary.merge_all()
 
-def add_eval_stats(summary_writer, step, linear_loss, before_loss, after_loss, stop_token_loss, loss):
+def add_eval_stats(summary_writer, step, before_loss, loss):
 	values = [
-	tf.Summary.Value(tag='Tacotron_eval_model/eval_stats/eval_before_loss', simple_value=before_loss),
-	tf.Summary.Value(tag='Tacotron_eval_model/eval_stats/eval_after_loss', simple_value=after_loss),
-	tf.Summary.Value(tag='Tacotron_eval_model/eval_stats/stop_token_loss', simple_value=stop_token_loss),
-	tf.Summary.Value(tag='Tacotron_eval_model/eval_stats/eval_loss', simple_value=loss),
+	tf.Summary.Value(tag='Dacotron_eval_model/eval_stats/eval_before_loss', simple_value=before_loss),
+	tf.Summary.Value(tag='Dacotron_eval_model/eval_stats/eval_loss', simple_value=loss),
 	]
-	if linear_loss is not None:
-		values.append(tf.Summary.Value(tag='Tacotron_eval_model/eval_stats/eval_linear_loss', simple_value=linear_loss))
 	test_summary = tf.Summary(value=values)
 	summary_writer.add_summary(test_summary, step)
 
@@ -79,7 +63,7 @@ def model_train_mode(args, feeder, hparams, global_step):
 	with tf.variable_scope('Duration_model', reuse=tf.AUTO_REUSE) as scope:
 		model_name = 'Duration'
 		model = create_model(model_name or args.model, hparams)
-		model.initialize(feeder.inputs_phoneme, feeder.inputs_type, feeder.inputs_time, feeder.input_lengths, feeder.mel_targets, feeder.token_targets, linear_targets=feeder.linear_targets,
+		model.initialize(feeder.inputs_phoneme, feeder.inputs_type, feeder.inputs_time, feeder.input_lengths, feeder.duration_targets,
 			targets_lengths=feeder.targets_lengths, global_step=global_step,
 			is_training=True, split_infos=feeder.split_infos)
 		model.add_loss()
@@ -88,29 +72,19 @@ def model_train_mode(args, feeder, hparams, global_step):
 		return model, stats
 
 def model_test_mode(args, feeder, hparams, global_step):
-	with tf.variable_scope('Tacotron_model', reuse=tf.AUTO_REUSE) as scope:
-		model_name = None
-		if args.model == 'Tacotron-2':
-			model_name = 'Tacotron'
+	with tf.variable_scope('Dacotron_model', reuse=tf.AUTO_REUSE) as scope:
+		model_name = 'Duration'
 		model = create_model(model_name or args.model, hparams)
-		if hparams.predict_linear:
-			model.initialize(feeder.eval_inputs, feeder.eval_input_lengths, feeder.eval_mel_targets, feeder.eval_token_targets,
-				linear_targets=feeder.eval_linear_targets, targets_lengths=feeder.eval_targets_lengths, global_step=global_step,
-				is_training=False, is_evaluating=True, split_infos=feeder.eval_split_infos)
-		else:
-			model.initialize(feeder.eval_inputs, feeder.eval_input_lengths, feeder.eval_mel_targets, feeder.eval_token_targets,
-				targets_lengths=feeder.eval_targets_lengths, global_step=global_step, is_training=False, is_evaluating=True, 
-				split_infos=feeder.eval_split_infos)
+		model.initialize(feeder.eval_inputs_phoneme, feeder.eval_inputs_type, feeder.eval_inputs_time, feeder.eval_input_lengths, feeder.eval_duration_targets,
+			targets_lengths=feeder.eval_targets_lengths, global_step=global_step, is_training=False, is_evaluating=True, 
+			split_infos=feeder.eval_split_infos)
 		model.add_loss()
 		return model
 
-def train(log_dir, hparams):
-    parser.add_argument('--base_dir', default='')
-    parser.add_argument('--duration_input', default='training_data/train.txt')
+def train(log_dir, args, hparams):
 	save_dir = os.path.join(log_dir, 'dur_pretrained')
 	plot_dir = os.path.join(log_dir, 'plots')
 	wav_dir = os.path.join(log_dir, 'wavs')
-	mel_dir = os.path.join(log_dir, 'mel-spectrograms')
 	eval_dir = os.path.join(log_dir, 'eval-dir')
 	eval_plot_dir = os.path.join(eval_dir, 'plots')
 	eval_wav_dir = os.path.join(eval_dir, 'wavs')
@@ -120,7 +94,6 @@ def train(log_dir, hparams):
 	os.makedirs(eval_dir, exist_ok=True)
 	os.makedirs(tensorboard_dir, exist_ok=True)
 	os.makedirs(meta_folder, exist_ok=True)
-    args = parser.parse_args()
 
 	checkpoint_path = os.path.join(save_dir, 'duration_model.ckpt')
 	input_path = os.path.join(args.base_dir, args.duration_input)
@@ -364,5 +337,5 @@ def train(log_dir, hparams):
 			traceback.print_exc()
 			coord.request_stop(e)
 
-def duration_train(log_dir, hparams):
-	return train(log_dir, hparams)
+def duration_train(args, log_dir, hparams):
+	return train(log_dir, args, hparams)

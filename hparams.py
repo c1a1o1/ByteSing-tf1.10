@@ -116,6 +116,8 @@ hparams = tf.contrib.training.HParams(
 	duration_batch_size = 32,
 	duration_test_size = 0.05,
 	duration_test_batches = None,
+	duration_phoneme_embedding_dim = 512,
+	duration_type_embedding_dim = 32,
 	
 	# model
 	multi_bi_lstm_units = 512,
